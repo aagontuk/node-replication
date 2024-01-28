@@ -22,6 +22,7 @@ use node_replication::{Dispatch, Log, Replica, ReplicaToken};
 use urcu_sys;
 
 mod utils;
+use utils::topology;
 
 fn main() {
     let args = std::env::args().filter(|e| e != "--bench");
@@ -44,7 +45,7 @@ fn main() {
                 .short("c")
                 .multiple(true)
                 .takes_value(true)
-                .possible_values(&["std", "chashmap", "urcu", "nr", "evmap", "flurry"])
+                .possible_values(&["std", "std-remote", "chashmap", "urcu", "nr", "evmap", "flurry"])
                 .help("What HashMap versions to benchmark."),
         )
         .arg(
@@ -129,6 +130,51 @@ fn main() {
             .partition(|&(write, _)| write);
         stat("std", "write", wres);
         stat("std", "read", rres);
+    }
+    
+    // benchmark Arc<RwLock<HashMap>> alllocated on a remote socket
+    if versions.contains(&"std-remote") {
+
+        // pin the thread to socket zero
+        let topology = topology::MachineTopology::new();
+        let sockets = topology.sockets();
+        let cores_on_s0 = topology.cpus_on_socket(sockets[0]).iter().map(|c| c.cpu).collect::<Vec<_>>();
+        let cores_on_s1 = topology.cpus_on_socket(sockets[1]).iter().map(|c| c.cpu).collect::<Vec<_>>();
+
+        utils::pin_thread(cores_on_s0[0]);
+
+        let map: HashMap<u64, u64> = HashMap::with_capacity(5_000_000);
+        let map = sync::Arc::new(parking_lot::RwLock::new(map));
+        let start = time::Instant::now();
+        let end = start + dur;
+        let mut next_core = 0;
+        join.extend((0..readers).into_iter().map(|_| {
+            let map = map.clone();
+            let dist = dist.to_owned();
+            let core_id = cores_on_s1[next_core];
+            next_core += 1;
+            thread::spawn(move || {
+                // pin to cores from socket 1
+                utils::pin_thread(core_id);
+                drive(map, end, dist, false, span)
+            })
+        }));
+        join.extend((0..writers).into_iter().map(|_| {
+            let map = map.clone();
+            let dist = dist.to_owned();
+            let core_id = cores_on_s1[next_core];
+            next_core += 1;
+            thread::spawn(move || {
+                utils::pin_thread(core_id);
+                drive(map, end, dist, true, span)
+            })
+        }));
+        let (wres, rres): (Vec<_>, _) = join
+            .drain(..)
+            .map(|jh| jh.join().unwrap())
+            .partition(|&(write, _)| write);
+        stat("std-remote", "write", wres);
+        stat("std-remote", "read", rres);
     }
 
     // then, benchmark Arc<flurry::HashMap>
