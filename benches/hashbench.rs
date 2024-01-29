@@ -23,6 +23,7 @@ use urcu_sys;
 
 mod utils;
 use utils::topology;
+use deepsize::DeepSizeOf;
 
 fn main() {
     let args = std::env::args().filter(|e| e != "--bench");
@@ -73,12 +74,21 @@ fn main() {
                 .help("Set the distribution for reads and writes")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("appendix")
+                .short("a")
+                .long("append")
+                .default_value("")
+                .help("Appendx to add to the dataset name")
+                .takes_value(true),
+        )
         .get_matches_from(args);
 
     let refresh = value_t!(matches, "eventual", usize).unwrap_or_else(|e| e.exit());
     let readers = value_t!(matches, "readers", usize).unwrap_or_else(|e| e.exit());
     let writers = value_t!(matches, "writers", usize).unwrap_or_else(|e| e.exit());
     let dist = matches.value_of("distribution").unwrap_or("uniform");
+    let appendix = matches.value_of("appendix").unwrap_or("");
     let dur = time::Duration::from_secs(5);
     let dur_in_ns = dur.as_secs() * 1_000_000_000_u64 + dur.subsec_nanos() as u64;
     let dur_in_s = dur_in_ns as f64 / 1_000_000_000_f64;
@@ -110,7 +120,9 @@ fn main() {
     let mut join = Vec::with_capacity(readers + writers);
     // first, benchmark Arc<RwLock<HashMap>>
     if versions.contains(&"std") {
-        let map: HashMap<u64, u64> = HashMap::with_capacity(5_000_000);
+        let map: HashMap<u64, u64> = HashMap::with_capacity(5_000_0000);
+        // print hashmap size in bytes
+        // println!("hashmap size: {}", map.deep_size_of());
         let map = sync::Arc::new(parking_lot::RwLock::new(map));
         let start = time::Instant::now();
         let end = start + dur;
@@ -128,8 +140,13 @@ fn main() {
             .drain(..)
             .map(|jh| jh.join().unwrap())
             .partition(|&(write, _)| write);
-        stat("std", "write", wres);
-        stat("std", "read", rres);
+
+        let mut benchname = "std".to_owned();
+        if ! appendix.is_empty() {
+            benchname = format!("{}-{}", benchname, appendix);
+        }
+        stat(&benchname, "write", wres);
+        stat(&benchname, "read", rres);
     }
     
     // benchmark Arc<RwLock<HashMap>> alllocated on a remote socket
